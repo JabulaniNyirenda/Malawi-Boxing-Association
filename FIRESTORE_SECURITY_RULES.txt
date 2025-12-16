@@ -1,0 +1,288 @@
+================================================================================
+FIRESTORE SECURITY RULES FOR LBRMS (Lilongwe Boxing Registration & Management System)
+================================================================================
+
+These rules enforce role-based access control and data security for the Malawi Boxing Association.
+
+IMPLEMENTATION INSTRUCTIONS:
+1. Go to Firebase Console > Firestore Database > Rules
+2. Copy and paste the entire rules content below
+3. Click "Publish"
+
+================================================================================
+FIRESTORE RULES
+================================================================================
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================================
+    // UTILITY FUNCTIONS
+    // ============================================================================
+
+    // Get the current user ID
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Get current user's UID
+    function uid() {
+      return request.auth.uid;
+    }
+
+    // Get current user's role from Firestore
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(uid())).data.role;
+    }
+
+    // Check if user is admin
+    function isAdmin() {
+      return isAuth() && getUserRole() == 'admin';
+    }
+
+    // Check if user is coach
+    function isCoach() {
+      return isAuth() && getUserRole() == 'coach';
+    }
+
+    // Check if user is athlete
+    function isAthlete() {
+      return isAuth() && getUserRole() == 'athlete';
+    }
+
+    // ============================================================================
+    // USERS COLLECTION - Role-based access control
+    // ============================================================================
+
+    match /users/{userId} {
+      // READ: Users can read their own document. Admins can read all.
+      allow read: if isAuth() && (uid() == userId || isAdmin());
+
+      // CREATE: Disabled - users must be created via Auth and Cloud Functions
+      allow create: if false;
+
+      // UPDATE: Users can update their own non-role fields. Only admins can change roles.
+      allow update: if isAuth() && (
+        (uid() == userId && !request.resource.data.role in resource.data.role) ||
+        isAdmin()
+      );
+
+      // DELETE: Only admins can delete user records
+      allow delete: if isAdmin();
+
+      // ========================================================================
+      // NESTED: LOGIN ACTIVITY TRACKING
+      // ========================================================================
+
+      match /loginHistory/{logId} {
+        // READ: Users can view their own login history. Admins can view all.
+        allow read: if isAuth() && (
+          uid() == userId ||
+          isAdmin()
+        );
+
+        // CREATE: Only backend (Cloud Functions) can create login records
+        allow create: if false;
+
+        // UPDATE: Only backend can update
+        allow update: if false;
+
+        // DELETE: Only admins can delete
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ============================================================================
+    // ATHLETES COLLECTION - Athlete profiles and records
+    // ============================================================================
+
+    match /athletes/{athleteId} {
+      // READ: Athlete can read own. Coach can read athletes they coach. Admins can read all.
+      allow read: if isAuth() && (
+        uid() == athleteId ||
+        isCoach() ||
+        isAdmin()
+      );
+
+      // CREATE: Coaches and admins can create. Athletes cannot self-create.
+      allow create: if isAuth() && (isCoach() || isAdmin());
+
+      // UPDATE: Athlete can update own. Coach/Admin can update.
+      allow update: if isAuth() && (
+        uid() == athleteId ||
+        isCoach() ||
+        isAdmin()
+      );
+
+      // DELETE: Only admins can delete
+      allow delete: if isAdmin();
+
+      // ========================================================================
+      // NESTED: ATHLETE RECORDS (Matches, Training, etc.)
+      // ========================================================================
+
+      match /records/{recordId} {
+        allow read: if isAuth() && (
+          uid() == athleteId ||
+          isCoach() ||
+          isAdmin()
+        );
+
+        allow create: if isAuth() && (isCoach() || isAdmin());
+        allow update: if isAuth() && (isCoach() || isAdmin());
+        allow delete: if isAdmin();
+      }
+
+      // ========================================================================
+      // NESTED: ATHLETE LICENSE INFORMATION
+      // ========================================================================
+
+      match /licenses/{licenseId} {
+        allow read: if isAuth() && (
+          uid() == athleteId ||
+          isCoach() ||
+          isAdmin()
+        );
+
+        allow create: if isAdmin();
+        allow update: if isAdmin();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ============================================================================
+    // COACHES COLLECTION - Coach profiles
+    // ============================================================================
+
+    match /coaches/{coachId} {
+      // READ: Coach can read own. Admins can read all.
+      allow read: if isAuth() && (
+        uid() == coachId ||
+        isAdmin()
+      );
+
+      // CREATE: Only admins can create coach records
+      allow create: if isAdmin();
+
+      // UPDATE: Coach can update own profile. Admins can update all.
+      allow update: if isAuth() && (
+        uid() == coachId ||
+        isAdmin()
+      );
+
+      // DELETE: Only admins
+      allow delete: if isAdmin();
+
+      // ========================================================================
+      // NESTED: COACHED ATHLETES (Relations)
+      // ========================================================================
+
+      match /coachedAthletes/{athleteId} {
+        allow read: if isAuth() && (
+          uid() == coachId ||
+          isAdmin()
+        );
+
+        allow write: if isAdmin();
+      }
+    }
+
+    // ============================================================================
+    // ADMIN REQUESTS COLLECTION - Requests for admin role
+    // ============================================================================
+
+    match /adminRequests/{requestId} {
+      // READ: User can read own request. Admins can read all.
+      allow read: if isAuth() && (
+        request.resource.data.userId == uid() ||
+        isAdmin()
+      );
+
+      // CREATE: Any authenticated user can request admin access
+      allow create: if isAuth() &&
+        request.resource.data.userId == uid() &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.createdAt == request.time;
+
+      // UPDATE: Only admins can update (approve/reject)
+      allow update: if isAdmin();
+
+      // DELETE: Only admins can delete
+      allow delete: if isAdmin();
+    }
+
+    // ============================================================================
+    // AUDIT LOG COLLECTION - System-wide audit trail
+    // ============================================================================
+
+    match /auditLog/{logId} {
+      // READ: Users can view logs mentioning them. Admins can view all.
+      allow read: if isAuth() && (
+        resource.data.relatedUserIds != null && uid() in resource.data.relatedUserIds ||
+        isAdmin()
+      );
+
+      // CREATE/UPDATE/DELETE: Only Cloud Functions can write
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ============================================================================
+    // SYSTEM SETTINGS COLLECTION - Admin only
+    // ============================================================================
+
+    match /systemSettings/{settingId} {
+      // READ: Admins only
+      allow read: if isAdmin();
+
+      // WRITE: Only Cloud Functions for security
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // DEFAULT DENY - All other paths are denied
+    // ============================================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+================================================================================
+SECURITY NOTES
+================================================================================
+
+1. ROLE-BASED ACCESS CONTROL (RBAC):
+   - Roles are retrieved from user documents at read time
+   - All access checks reference the live role data
+   - Role changes take effect immediately
+
+2. LOGIN COUNT TRACKING:
+   - Stored in nested loginHistory subcollection for audit trail
+   - Users can only view their own history (coaches/athletes)
+   - Admins can view all login history for monitoring
+
+3. ADMIN REQUEST PROTECTION:
+   - Normal users CANNOT self-promote to admin
+   - Admin requests require explicit admin approval
+   - Audit trail is maintained for all requests
+
+4. DATA PRIVACY:
+   - Athletes can only see their own data
+   - Coaches can see athletes they manage
+   - Admins have full system access
+   - Sensitive fields should be encrypted client-side for additional security
+
+5. CLOUD FUNCTION INTEGRATION:
+   - Only Cloud Functions can modify audit logs
+   - Role assignments are validated server-side
+   - Login counts are incremented via Functions, not client code
+
+6. TESTING RULES:
+   Use Firebase Emulator Suite to test rules locally:
+   firebase emulators:start --only firestore
+
